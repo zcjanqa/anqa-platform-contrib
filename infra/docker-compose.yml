@@ -1,0 +1,174 @@
+networks:
+  web:
+    external: true
+
+volumes:
+  letsencrypt: {}
+
+services:
+  traefik:
+    image: traefik:3
+    container_name: traefik
+    command:
+      # providers
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      # entrypoints
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      # ACME / Let's Encrypt
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      # dashboard off (flip to true only if you protect it)
+      - --api.dashboard=false
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+      # Remove all traefik.http (until line 45) to stop Redirect   prototype.anqa.cloud → ${DOMAIN_FRONTEND} (HTTPS), preserve path, permanent
+    labels:
+      - traefik.enable=true
+      # Redirect prototype.anqa.cloud → ${DOMAIN_FRONTEND} (HTTPS), preserve path, permanent
+      - traefik.http.routers.redirect-prototype.rule=Host(`prototype.anqa.cloud`)
+      - traefik.http.routers.redirect-prototype.entrypoints=websecure
+      - traefik.http.routers.redirect-prototype.tls.certresolver=letsencrypt
+      - traefik.http.routers.redirect-prototype.middlewares=prototype-to-main
+      - traefik.http.routers.redirect-prototype.service=noop@internal
+      - traefik.http.middlewares.prototype-to-main.redirectregex.regex=^https?://prototype\.anqa\.cloud/(.*)
+      - traefik.http.middlewares.prototype-to-main.redirectregex.replacement=https://${DOMAIN_FRONTEND}/$${1}
+      - traefik.http.middlewares.prototype-to-main.redirectregex.permanent=true
+      # Ensure ACME HTTP-01 challenges are always served on port 80 (no redirect)
+      - traefik.http.routers.acme-challenge.rule=PathPrefix(`/.well-known/acme-challenge/`)
+      - traefik.http.routers.acme-challenge.entrypoints=web
+      - traefik.http.routers.acme-challenge.service=noop@internal
+    networks: [web]
+    restart: unless-stopped
+
+  
+  turn:
+    image: instrumentisto/coturn:latest
+    container_name: anqa-turn
+    command:
+      - -n
+      - --log-file=stdout
+      - --realm=${TURN_REALM:-anqa.cloud}
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_STATIC_AUTH_SECRET}
+      - -X ${TURN_EXTERNAL_IP}
+      - --min-port=49160
+      - --max-port=49200
+      - --listening-port=3478
+      - --tls-listening-port=5349
+      # Enable TLS for stricter networks if certs are mounted
+      - --no-sslv3
+      - --no-tlsv1
+      # To enable TLS after issuing certs for turn.${DOMAIN_FRONTEND}, uncomment:
+      - --cert=/certs/fullchain.pem
+      - --pkey=/certs/privkey.pem
+    environment:
+      - TZ=${TZ:-UTC}
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
+    # After cert issuance, mount certs
+    volumes:
+      - /etc/letsencrypt/live/turn.${DOMAIN_FRONTEND}/fullchain.pem:/certs/fullchain.pem:ro
+      - /etc/letsencrypt/live/turn.${DOMAIN_FRONTEND}/privkey.pem:/certs/privkey.pem:ro
+    # Do NOT attach to Traefik network; TURN must expose UDP directly
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ../apps/backend
+      dockerfile: Dockerfile
+    container_name: anqa-backend
+    environment:
+      - ENVIRONMENT=production
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - DOMAIN_FRONTEND=${DOMAIN_FRONTEND}
+      - TURN_STATIC_AUTH_SECRET=${TURN_STATIC_AUTH_SECRET}
+      - TURN_HOST=${TURN_HOST}
+      - TURN_ENABLE_TURNS=${TURN_ENABLE_TURNS}
+      - TURN_ENABLE_TLS=${TURN_ENABLE_TLS}
+      - WEBRTC_RECORDER_FORMAT=${WEBRTC_RECORDER_FORMAT}
+      - SUPABASE_PROJECT_URL=${SUPABASE_PROJECT_URL}
+      - SUPABASE_API_KEY=${SUPABASE_API_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_PROJECT_ID=${SUPABASE_PROJECT_ID}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
+      - SUPABASE_REST_KEY=${SUPABASE_REST_KEY}
+      - SUPABASE_RECORDINGS_BUCKET=${SUPABASE_RECORDINGS_BUCKET}
+      - EMAIL_BACKEND=${EMAIL_BACKEND}
+      - BREVO_API_KEY=${BREVO_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - COHERE_API_KEY=${COHERE_API_KEY}
+      - CRAWLER_API_KEY=${CRAWLER_API_KEY}
+      - TWITTER_API_KEY=${TWITTER_API_KEY}
+      - DISABLE_AUTH=${DISABLE_AUTH}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.backend.rule=Host(`${DOMAIN_BACKEND}`)
+      - traefik.http.routers.backend.entrypoints=websecure
+      - traefik.http.routers.backend.tls.certresolver=letsencrypt
+      - traefik.http.services.backend.loadbalancer.server.port=8000
+      # Also serve the backend under the frontend domain at /api → strip the /api prefix
+      - traefik.http.routers.backend-api.rule=Host(`${DOMAIN_FRONTEND}`) && PathPrefix(`/api`)
+      - traefik.http.routers.backend-api.entrypoints=websecure
+      - traefik.http.routers.backend-api.tls.certresolver=letsencrypt
+      - traefik.http.routers.backend-api.service=backend
+      - traefik.http.routers.backend-api.priority=1000
+      - traefik.http.routers.backend-api.middlewares=strip-api-prefix
+      # Mirror the API router for www.${DOMAIN_FRONTEND}
+      - traefik.http.routers.backend-api-www.rule=Host(`www.${DOMAIN_FRONTEND}`) && PathPrefix(`/api`)
+      - traefik.http.routers.backend-api-www.entrypoints=websecure
+      - traefik.http.routers.backend-api-www.tls.certresolver=letsencrypt
+      - traefik.http.routers.backend-api-www.service=backend
+      - traefik.http.routers.backend-api-www.priority=1000
+      - traefik.http.routers.backend-api-www.middlewares=strip-api-prefix
+      - traefik.http.middlewares.strip-api-prefix.stripprefix.prefixes=/api
+    networks: [web]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8000/health\").getcode()==200 else 1)'"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ../apps/frontend
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    container_name: anqa-frontend
+    environment:
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.frontend.rule=Host(`${DOMAIN_FRONTEND}`) && !PathPrefix(`/api`)
+      - traefik.http.routers.frontend.entrypoints=websecure
+      - traefik.http.routers.frontend.tls.certresolver=letsencrypt
+      - traefik.http.services.frontend.loadbalancer.server.port=3000
+      - traefik.http.routers.frontend.priority=10
+      # Serve and redirect www.${DOMAIN_FRONTEND} → ${DOMAIN_FRONTEND}
+      - traefik.http.routers.frontend-www.rule=Host(`www.${DOMAIN_FRONTEND}`)
+      - traefik.http.routers.frontend-www.entrypoints=websecure
+      - traefik.http.routers.frontend-www.tls.certresolver=letsencrypt
+      - traefik.http.routers.frontend-www.middlewares=redirect-www-to-apex
+      - traefik.http.routers.frontend-www.service=noop@internal
+      - traefik.http.middlewares.redirect-www-to-apex.redirectregex.regex=^https?://www\.${DOMAIN_FRONTEND}/(.*)
+      - traefik.http.middlewares.redirect-www-to-apex.redirectregex.replacement=https://${DOMAIN_FRONTEND}/$${1}
+      - traefik.http.middlewares.redirect-www-to-apex.redirectregex.permanent=true
+    networks: [web]
+    restart: unless-stopped

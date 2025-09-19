@@ -1,0 +1,42 @@
+{
+    "name": "anqa-platform",
+    "private": true,
+    "description": "Root scripts to run ANQA frontend + backend via Docker Compose",
+    "engines": {
+      "node": ">=18"
+    },
+    "scripts": {
+      "dev": "docker compose -f infra/docker-compose.local.yml up --build",
+      "dev:detached": "docker compose -f infra/docker-compose.local.yml up --build -d",
+      "stop": "docker compose -f infra/docker-compose.local.yml down",
+      "logs": "docker compose -f infra/docker-compose.local.yml logs -f --tail=100",
+      "ps": "docker compose -f infra/docker-compose.local.yml ps",
+      "rebuild": "docker compose -f infra/docker-compose.local.yml build --no-cache",
+  
+      "prod:pull": "docker compose -f infra/docker-compose.yml --env-file infra/.env pull",
+      "prod:up": "docker compose -f infra/docker-compose.yml --env-file infra/.env up -d",
+      "prod:restart": "npm run prod:pull && npm run prod:up",
+      "prod:logs": "docker compose -f infra/docker-compose.yml logs -f --tail=100",
+
+      "prod:deploy": "bash ./infra/deploy-latest.sh",
+      "prod:deploy:update": "bash ./infra/deploy-latest.sh --update-repo",
+  
+      "lint": "npm run lint:frontend && npm run lint:backend",
+      "lint:frontend": "cd apps/frontend && npm run lint",
+      "lint:backend": "cd apps/backend && black . && isort .",
+      "format": "npm run lint:frontend -- --fix && cd apps/backend && black . && isort .",
+      "test": "npm run test:frontend && npm run test:backend",
+  
+      "prepare": "husky install"
+    },
+    "husky": {
+      "hooks": {
+        "pre-commit": "lint-staged"
+      }
+    },
+    "lint-staged": {
+      "*.{ts,tsx}": ["eslint --fix", "prettier --write"],
+      "*.py": ["black", "isort"]
+    }
+  }
+  

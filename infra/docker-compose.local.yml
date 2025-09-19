@@ -1,0 +1,77 @@
+services:
+  backend:
+    build:
+      context: ../apps/backend
+      dockerfile: Dockerfile
+    container_name: anqa-backend-local
+    env_file:
+      - ../.env
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8000/health\").getcode()==200 else 1)'"]
+      interval: 10m
+      timeout: 10s
+      retries: 3
+    volumes:
+      - ../apps/backend:/app
+    command: ["sh","-lc","pip install --no-cache-dir -r /app/requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]
+    environment:
+      - ENVIRONMENT=development
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_PROJECT_URL=${SUPABASE_PROJECT_URL}
+      - SUPABASE_RECORDINGS_BUCKET=${SUPABASE_RECORDINGS_BUCKET}
+      - TURN_ENABLE_TURNS=${TURN_ENABLE_TURNS}
+      - TURN_ENABLE_TLS=${TURN_ENABLE_TLS}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  turn:
+    image: instrumentisto/coturn:latest
+    container_name: anqa-turn-local
+    command:
+      - -n
+      - --log-file=stdout
+      - --realm=${TURN_REALM:-anqa.local}
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_STATIC_AUTH_SECRET:-localdevsecret}
+      - --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
+      - --min-port=49160
+      - --max-port=49200
+      - --no-sslv3
+      - --no-tlsv1
+    environment:
+      - TZ=${TZ:-UTC}
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../apps/frontend
+      dockerfile: Dockerfile
+      target: dev
+      args:
+        # Enable /api rewrite to backend during build-time config and dev
+        SET_API_TO_LOCAL: "1"
+        API_LOCAL_TARGET: "http://backend:8000"
+    container_name: anqa-frontend-local
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    environment:
+      # Ensure reliable HMR file watching inside Docker on macOS/Windows
+      - WATCHPACK_POLLING=true
+      - CHOKIDAR_USEPOLLING=true
+      - SET_API_TO_LOCAL=1
+      - API_LOCAL_TARGET=http://backend:8000
+    volumes:
+      - ../apps/frontend:/app
+      # Persist node_modules inside the container while allowing source bind mount
+      - /app/node_modules

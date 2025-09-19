@@ -1,0 +1,8 @@
+api:
+  dashboard: false
+entryPoints:
+  http:
+    address: ":80"
+providers:
+  docker:
+    exposedByDefault: false
